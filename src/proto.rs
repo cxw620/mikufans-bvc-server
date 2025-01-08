@@ -110,7 +110,7 @@ impl Request {
 
 #[derive(Debug, Clone)]
 /// HTTP Response
-pub(crate) struct Response {
+pub(crate) struct Response<B = Vec<u8>> {
     /// Response Status code
     pub status: StatusCode,
 
@@ -118,7 +118,7 @@ pub(crate) struct Response {
     pub headers: HeaderMap,
 
     /// Response Body
-    pub body: Option<Vec<u8>>,
+    pub body: Option<B>,
 }
 
 impl Default for Response {
@@ -142,7 +142,6 @@ impl Default for Response {
     }
 }
 
-#[allow(unused, reason = "pub(crate), may be used in the future")]
 impl Response {
     #[inline]
     pub(crate) fn status(status: StatusCode) -> Self {
@@ -151,23 +150,41 @@ impl Response {
             ..Default::default()
         }
     }
+}
 
+#[allow(unused, reason = "pub(crate), may be used in the future")]
+impl<B> Response<B> {
     /// Set HTTP [`StatusCode`].
-    pub(crate) const fn set_status(mut self, status: StatusCode) -> Self {
+    pub(crate) const fn set_status(&mut self, status: StatusCode) -> &mut Self {
         self.status = status;
         self
     }
 
     /// Set HTTP [`HeaderMap`].
-    pub(crate) fn set_headers(mut self, headers: HeaderMap) -> Self {
+    pub(crate) fn set_headers(&mut self, headers: HeaderMap) -> &mut Self {
         self.headers = headers;
         self
     }
 
     /// Set Body
-    pub(crate) fn set_body(mut self, body: Option<Vec<u8>>) -> Self {
-        self.body = body;
+    pub(crate) fn set_body(&mut self, body: B) -> &mut Self
+    where
+        B: AsRef<[u8]>,
+    {
+        self.body = Some(body);
         self
+    }
+
+    /// With Body
+    pub(crate) fn with_body<NB>(self, body: NB) -> Response<NB>
+    where
+        NB: AsRef<[u8]>,
+    {
+        Response {
+            status: self.status,
+            headers: self.headers,
+            body: Some(body),
+        }
     }
 
     #[inline]
@@ -177,7 +194,10 @@ impl Response {
     }
 
     /// Write the response to a [`TcpStream`].
-    pub(crate) async fn write_to_stream(mut self, tcp_stream: &mut TcpStream) -> Result<()> {
+    pub(crate) async fn write_to_stream(mut self, tcp_stream: &mut TcpStream) -> Result<()>
+    where
+        B: AsRef<[u8]>,
+    {
         tracing::debug!("Writting response to {}", tcp_stream.peer_addr()?);
 
         let mut buf_writer = BufWriter::new(tcp_stream);
@@ -189,8 +209,10 @@ impl Response {
             .await?;
         buf_writer.write_all(b"\r\n").await?;
 
+        let body = self.body.as_ref().map(AsRef::as_ref);
+
         // Header lines
-        if let Some(len) = self.body.as_ref().map(|body| body.len()) {
+        if let Some(len) = body.map(|body| body.as_ref().len()) {
             self.headers.insert(
                 CONTENT_LENGTH,
                 NumStr::new_default(len).to_http_header_value()?,
@@ -209,8 +231,8 @@ impl Response {
         buf_writer.write_all(b"\r\n").await?;
 
         // Body
-        if let Some(body) = self.body {
-            buf_writer.write_all(&body).await?;
+        if let Some(body) = body {
+            buf_writer.write_all(body).await?;
         }
 
         buf_writer.flush().await?;
